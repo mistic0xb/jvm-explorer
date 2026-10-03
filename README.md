@@ -1,4 +1,5 @@
 # JVM 25 Explorer
+[![Live Demo](https://img.shields.io/badge/live%20demo-jvm--explorer.mistic.xyz-79c0ff?style=for-the-badge)](https://jvm-explorer.mistic.xyz/)
 
 An interactive, single-file 3D visualization of how a modern JVM (Java 25, G1 collector) manages the heap: allocation, reachability, generations, evacuation, promotion, humongous objects, and mixed collections.
 
