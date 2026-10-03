@@ -72,6 +72,26 @@ button.on{border-color:var(--ac);color:var(--ac);background:rgba(121,192,255,.10
   #info{width:200px;max-width:44vw;padding:8px 9px}
   #log{height:7.2em}
 }
+
+#footer{
+  position:fixed;
+  right:8px;
+  bottom:calc(8px + env(safe-area-inset-bottom,0px));
+  font-size:14px;
+  color:var(--mut);
+  background:var(--pn);
+  border:1px solid var(--bd);
+  border-radius:8px;
+  padding:5px 10px;
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  z-index:30;
+  pointer-events:auto;
+}
+#footer a{color:var(--ac);text-decoration:none;border-bottom:1px dotted var(--ac)}
+#footer a:hover{color:#a7d8ff;border-bottom-style:solid}
+@media (max-width:640px){#footer{font-size:10px;padding:4px 8px}}
+
 </style>
 </head>
 <body>
@@ -986,5 +1006,8 @@ requestAnimationFrame(frame);
 
 })();
 </script>
+<div id="footer" class="p" style="background:var(--pn);border:1px solid var(--bd)">
+  made with curiosity by <a href="https://x.com/mistic_twt" target="_blank" rel="noopener noreferrer">mist</a>
+</div>
 </body>
 </html>
