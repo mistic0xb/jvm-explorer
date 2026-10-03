@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM 25 Explorer — G1 heap, allocation &amp; GC in 3D</title>
+<style>
+:root{
+  --bg:#0e1116;--fg:#e6edf3;--mut:#8b949e;--pn:rgba(16,21,28,.90);--bd:#30363d;--ac:#79c0ff;
+  box-sizing:border-box;
+}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg);
+  font:13px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+
+.p{position:fixed;background:var(--pn);border:1px solid var(--bd);border-radius:10px;
+   padding:10px 12px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+   box-shadow:0 8px 26px rgba(0,0,0,.45)}
+
+/* ---------- left control panel ---------- */
+#ui{left:8px;top:calc(8px + env(safe-area-inset-top,0px));width:252px;
+    max-height:calc(100% - 150px);overflow:auto;overscroll-behavior:contain}
+#ui h1{font-size:15px;margin:0 0 4px;letter-spacing:.2px;display:flex;align-items:center;gap:6px}
+#ui h1 .dot{width:8px;height:8px;border-radius:50%;background:var(--ac);box-shadow:0 0 10px var(--ac)}
+#hud{color:#b6c2cf;font-size:12px;margin-bottom:8px;line-height:1.7}
+#hud b{color:#fff}
+.dote{display:inline-block;width:8px;height:8px;border-radius:2px;margin:0 3px 0 6px;vertical-align:-1px}
+
+.gt{color:var(--mut);margin:8px 0 0;font-size:11px;text-transform:uppercase;letter-spacing:.55px;font-weight:600}
+.g{display:flex;flex-wrap:wrap;gap:4px;margin:5px 0 2px}
+button{background:#21262d;color:var(--fg);border:1px solid var(--bd);border-radius:6px;
+  padding:5px 9px;font:inherit;font-size:12px;cursor:pointer;transition:.14s;white-space:nowrap}
+button:hover{border-color:var(--ac);background:#262d36;transform:translateY(-1px)}
+button:active{transform:translateY(0)}
+button:focus-visible{outline:2px solid var(--ac);outline-offset:1px}
+button.on{border-color:var(--ac);color:var(--ac);background:rgba(121,192,255,.10)}
+
+.lg{display:grid;grid-template-columns:1fr 1fr;gap:3px 8px;color:#a9b6c4;font-size:11.5px;margin-top:6px}
+.lg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.note{color:var(--mut);font-size:11px;line-height:1.45;margin-top:8px;border-top:1px solid var(--bd);padding-top:7px}
+
+/* ---------- right inspector ---------- */
+#info{right:8px;top:calc(8px + env(safe-area-inset-top,0px));width:250px;max-width:44vw}
+#info .ttl{font-size:11px;text-transform:uppercase;letter-spacing:.55px;color:var(--mut);font-weight:600;margin-bottom:6px}
+#infoBody{font-size:12px}
+#infoBody .hdr{font-size:14px;font-weight:700;margin-bottom:6px;word-break:break-word}
+#infoBody .kv{display:flex;justify-content:space-between;gap:10px;padding:2px 0;border-bottom:1px dashed rgba(48,54,61,.55)}
+#infoBody .kv:last-of-type{border-bottom:0}
+#infoBody .kv span{color:var(--mut);flex:0 0 auto}
+#infoBody .kv b{font-weight:600;text-align:right;word-break:break-word}
+#infoBody .note{color:var(--mut);font-size:11px;line-height:1.45;margin-top:8px;border-top:1px solid var(--bd);padding-top:7px}
+
+/* ---------- log ---------- */
+#log{left:8px;bottom:calc(8px + env(safe-area-inset-bottom,0px));
+     width:min(620px,calc(100% - 16px));height:8.6em;overflow:hidden;
+     font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:8px 10px}
+#log div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#c9d1d9}
+#log .gc{color:#e3b341}
+#log .err{color:#ff7b72;font-weight:600}
+#log .alloc{color:#56d364}
+#log .lnk{color:#a5d6ff}
+
+/* ---------- hover tooltip ---------- */
+#tip{position:fixed;pointer-events:none;display:none;z-index:40;padding:5px 9px;font-size:12px;
+     border-radius:7px;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+#tip b{color:#fff}
+#tip .sub{color:var(--mut);font-size:11px}
+
+@media (max-width:640px){
+  #ui{width:200px;padding:8px 9px}
+  #info{width:200px;max-width:44vw;padding:8px 9px}
+  #log{height:7.2em}
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui" class="p">
+  <h1><span class="dot"></span>JVM 25 Explorer</h1>
+  <div id="hud"></div>
+
+  <div class="gt">Allocate</div>
+  <div class="g" id="g1"></div>
+
+  <div class="gt">Garbage collector</div>
+  <div class="g" id="g2"></div>
+
+  <div class="gt">Navigate</div>
+  <div class="g" id="g3"></div>
+
+  <div class="lg">
+    <span><i style="background:#3fb950"></i>Eden</span>
+    <span><i style="background:#d29922"></i>Survivor</span>
+    <span><i style="background:#388bfd"></i>Old</span>
+    <span><i style="background:#f85149"></i>Humongous</span>
+    <span><i style="background:#59616b"></i>Garbage</span>
+    <span><i style="background:#2d333b"></i>Free region</span>
+    <span><i style="background:#d2a8ff"></i>Class metadata</span>
+    <span><i style="background:#ffa657"></i>GC root</span>
+  </div>
+
+  <div class="note">
+    Simplified simulation, not a real JVM. Tenuring threshold is 3 here (HotSpot adapts it, max 15).
+    Click any object, region, class box or the stack to inspect it — hover to preview.
+  </div>
+</div>
+
+<div id="info" class="p">
+  <div class="ttl">Inspector</div>
+  <div id="infoBody"></div>
+</div>
+
+<div id="log" class="p"></div>
+<div id="tip" class="p"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+/* =====================================================================
+   Constants — Java 25 / G1 defaults used by this model
+   ===================================================================== */
+const REG_C = 8, REG_R = 4, SP = 3.4, CAP = 4, TENURE = 3, ZSTACK = 9.6;
+const COL  = { free:0x2d333b, eden:0x3fb950, surv:0xd29922, old:0x388bfd, humo:0xf85149 };
+const TNAME= { free:'free', eden:'eden', surv:'survivor', old:'old', humo:'humongous' };
+const CL = {
+  Order:      { size:32, col:0xff7b72, z:-3 },
+  Customer:   { size:24, col:0xd2a8ff, z:-1 },
+  Item:       { size:24, col:0xffa657, z: 1 },
+  'byte[]':   { size:0,  col:0xffb3ae, z: 3 }
+};
+const SL = [[-.75,-.75],[.75,-.75],[-.75,.75],[.75,.75]];
+
+/* =====================================================================
+   Renderer / scene
+   ===================================================================== */
+const cv = $('#c');
+const ren = new THREE.WebGLRenderer({ canvas:cv, antialias:true });
+ren.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1116);
+
+const cam = new THREE.PerspectiveCamera(55, 1, .1, 400);
+
+scene.add(new THREE.AmbientLight(0xffffff, .72));
+const dl = new THREE.DirectionalLight(0xffffff, .85); dl.position.set(8, 20, 12); scene.add(dl);
+const dl2 = new THREE.DirectionalLight(0x9ab8ff, .30); dl2.position.set(-14, 9, -10); scene.add(dl2);
+
+/* =====================================================================
+   Crisp, outlined, background-padded text sprites
+   ===================================================================== */
+function makeLabel(txt, worldW, opt){
+  opt = opt || {};
+  const fs   = opt.fs   || 64;
+  const pad  = opt.pad  || 28;
+  const font = '700 ' + fs + 'px system-ui,-apple-system,"Segoe UI",sans-serif';
+
+  const probe = document.createElement('canvas').getContext('2d');
+  probe.font = font;
+  const tw = Math.ceil(probe.measureText(txt).width);
+
+  const w = Math.max(8, tw + pad * 2);
+  const h = Math.round(fs * 1.55 + pad * 0.6);
+
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle';
+
+  if (opt.bg !== false){
+    const r = Math.min(h / 2, 18);
+    g.beginPath();
+    g.moveTo(r, 1.5);
+    g.lineTo(w - r, 1.5); g.quadraticCurveTo(w - 1.5, 1.5, w - 1.5, r);
+    g.lineTo(w - 1.5, h - r); g.quadraticCurveTo(w - 1.5, h - 1.5, w - r, h - 1.5);
+    g.lineTo(r, h - 1.5); g.quadraticCurveTo(1.5, h - 1.5, 1.5, h - r);
+    g.lineTo(1.5, r); g.quadraticCurveTo(1.5, 1.5, r, 1.5);
+    g.closePath();
+    g.fillStyle = opt.bg || 'rgba(13,17,23,.80)';
+    g.fill();
+    g.strokeStyle = opt.border || 'rgba(121,192,255,.38)';
+    g.lineWidth = 2.5; g.stroke();
+  }
+
+  g.lineWidth = 11; g.lineJoin = 'round';
+  g.strokeStyle = 'rgba(0,0,0,.92)';
+  g.strokeText(txt, w / 2, h / 2 + 1);
+  g.fillStyle = opt.color || '#eaf2fb';
+  g.fillText(txt, w / 2, h / 2 + 1);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false, depthWrite: false
+  }));
+  sp.scale.set(worldW, worldW * h / w, 1);
+  sp.renderOrder = 900;
+  return sp;
+}
+
+function plate(w, d, x, z, color){
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, .3, d),
+                           new THREE.MeshLambertMaterial({ color }));
+  m.position.set(x, 0, z);
+  scene.add(m);
+  return m;
+}
+
+/* =====================================================================
+   Heap: 32 G1 regions
+   ===================================================================== */
+const regions = [], regionMeshes = [];
+const plateGeo = new THREE.BoxGeometry(3, .3, 3);
+const edgeGeo  = new THREE.EdgesGeometry(plateGeo);
+const edgeMat  = new THREE.LineBasicMaterial({ color:0x9fb0c3, transparent:true, opacity:.22 });
+
+for (let r = 0; r < REG_R; r++){
+  for (let c = 0; c < REG_C; c++){
+    const mat = new THREE.MeshLambertMaterial({ color: COL.free });
+    const m = new THREE.Mesh(plateGeo, mat);
+    m.position.set((c - (REG_C - 1) / 2) * SP, 0, (r - (REG_R - 1) / 2) * SP);
+
+    const e = new THREE.LineSegments(edgeGeo, edgeMat);
+    m.add(e);
+
+    scene.add(m);
+    const reg = { m, type:'free', objs:[], i:regions.length, flash:0 };
+    m.userData.reg = reg;
+    regions.push(reg);
+    regionMeshes.push(m);
+  }
+}
+
+function setType(r, t){
+  if (r.type !== t) r.flash = 1;         // pulse the tile when its role changes
+  r.type = t;
+  r.m.material.color.setHex(COL[t]);
+}
+
+/* floating region-id labels (toggleable) */
+const regionLabels = [];
+for (const reg of regions){
+  const l = makeLabel('R' + reg.i, 1.25, {
+    fs:52, pad:16, bg:'rgba(13,17,23,.62)',
+    border:'rgba(139,148,158,.45)', color:'#a9bacd'
+  });
+  l.position.set(reg.m.position.x, .55, reg.m.position.z + 1.25);
+  l.visible = false;
+  scene.add(l);
+  regionLabels.push(l);
+}
+let showRegLabels = false;
+
+const heapTitle = makeLabel('G1 heap — 32 equal-sized regions', 11, { fs:58 });
+heapTitle.position.set(0, 3.0, -((REG_R - 1) / 2) * SP - 3.2);
+scene.add(heapTitle);
+
+/* =====================================================================
+   Java thread stack (GC roots)
+   ===================================================================== */
+const stackPlate = plate(14, 2.2, 0, ZSTACK, 0x3b2f1c);
+stackPlate.userData.special = 'stack';
+
+const stackTitle = makeLabel('Java thread stack — locals are GC roots', 10.5, { fs:54 });
+stackTitle.position.set(0, 2.0, ZSTACK + 2.3);
+scene.add(stackTitle);
+
+const slotMeshes = [];
+for (let i = 0; i < 10; i++){
+  const s = new THREE.Mesh(new THREE.BoxGeometry(1, .14, 1.5),
+                           new THREE.MeshLambertMaterial({ color:0x2a2116 }));
+  s.position.set(-5.4 + i * 1.2, .20, ZSTACK);
+  scene.add(s);
+  slotMeshes.push(s);
+}
+
+const markers = [];
+for (let i = 0; i < 10; i++){
+  const m = new THREE.Mesh(new THREE.SphereGeometry(.30, 14, 14),
+                           new THREE.MeshLambertMaterial({ color:0xffa657, emissive:0x3a1f00 }));
+  m.position.set(-5.4 + i * 1.2, .62, ZSTACK);
+  m.visible = false;
+  scene.add(m);
+  markers.push(m);
+}
+
+/* =====================================================================
+   Metaspace (native memory, off-heap)
+   ===================================================================== */
+const metaPlate = plate(5, 9, -17, 0, 0x3a2a63);
+metaPlate.userData.special = 'meta';
+
+const metaTitle = makeLabel('Metaspace — class metadata (native, off-heap)', 10.5, { fs:52 });
+metaTitle.position.set(-17, 2.5, -6.2);
+scene.add(metaTitle);
+
+const BOX = new THREE.BoxGeometry(1, 1, 1);
+for (const k in CL){
+  const m = new THREE.Mesh(BOX, new THREE.MeshLambertMaterial({ color: CL[k].col }));
+  m.scale.set(2.8, .62, 1.4);
+  m.position.set(-17, .55, CL[k].z * 1.2);
+  scene.add(m);
+  CL[k].mesh = m;
+
+  const t = makeLabel(k + '.class', 3.4, { fs:50, pad:18 });
+  t.position.set(-17, 1.6, CL[k].z * 1.2);
+  scene.add(t);
+}
+
+/* =====================================================================
+   Line buffers (references / roots / klass pointers)
+   ===================================================================== */
+function mkLines(max, c0, c1){
+  const g = new THREE.BufferGeometry();
+  const p = new Float32Array(max * 6);
+  const c = new Float32Array(max * 6);
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  g.setAttribute('color',    new THREE.BufferAttribute(c, 3));
+  const l = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors:true }));
+  l.frustumCulled = false;
+  scene.add(l);
+  return { l, g, p, c, n:0, max, c0:new THREE.Color(c0), c1:new THREE.Color(c1) };
+}
+function seg(L, a, b, k){
+  if (L.n >= L.max) return;
+  k = (k === undefined) ? 1 : k;
+  const i = L.n * 6;
+  L.p.set([a.x, a.y, a.z, b.x, b.y, b.z], i);
+  L.c.set([L.c0.r*k, L.c0.g*k, L.c0.b*k, L.c1.r*k, L.c1.g*k, L.c1.b*k], i);
+  L.n++;
+}
+function flush(L){
+  L.g.setDrawRange(0, L.n * 2);
+  L.g.attributes.position.needsUpdate = true;
+  L.g.attributes.color.needsUpdate = true;
+  L.n = 0;
+}
+const RefL  = mkLines(900, 0x2c4257, 0x79c0ff);
+const RootL = mkLines(24,  0x7a4a10, 0xffa657);
+const KL    = mkLines(320, 0x3a2a63, 0xd2a8ff);
+let showK = false;
+
+/* =====================================================================
+   State
+   ===================================================================== */
+let objs = [], roots = [], nid = 1;
+let reachSet = new Set(), selO = null, selR = null, selSpecial = null;
+let hoverO = null, hoverR = null;
+const pickables = [];
+const dying = [];                 // { m, s0, life }
+const logs = [];
+
+function log(s){
+  logs.push(s);
+  if (logs.length > 6) logs.shift();
+  $('#log').innerHTML = logs.map(l => {
+    let cls = '';
+    if (/^Pause|^Concurrent/.test(l))            cls = 'gc';
+    else if (/OutOfMemory|exhausted/.test(l))    cls = 'err';
+    else if (/^new /.test(l))                    cls = 'alloc';
+    else if (/field ->/.test(l))                 cls = 'lnk';
+    return '<div class="' + cls + '">' + esc(l) + '</div>';
+  }).join('');
+}
+
+const used = () => regions.filter(r => r.type !== 'free').length;
+const nm   = o => o.cls + '#' + o.id;
+
+/* =====================================================================
+   Reachability
+   ===================================================================== */
+function reach(){
+  const s = new Set(), st = roots.slice();
+  while (st.length){
+    const o = st.pop();
+    if (!o || o.dead || s.has(o)) continue;
+    s.add(o);
+    for (const x of o.refs) st.push(x);
+  }
+  return s;
+}
+
+function setTarget(o){
+  const p = o.reg.m.position;
+  if (o.humo) o.target.set(p.x, .2 + o.ts / 2, p.z);
+  else {
+    const s = SL[o.slot % 4];
+    o.target.set(p.x + s[0], .65, p.z + s[1]);
+  }
+}
+
+function move(o, d){
+  d.objs.push(o);
+  o.reg = d;
+  o.slot = d.objs.length - 1;
+  setTarget(o);
+}
+
+function mkObj(cls, humo){
+  const m = new THREE.Mesh(BOX, new THREE.MeshLambertMaterial({ color: CL[cls].col }));
+  m.scale.setScalar(.01);
+  scene.add(m);
+  const o = {
+    id: nid++, cls, size: CL[cls].size, refs: [], age: 0,
+    mesh: m, reg: null, slot: 0,
+    target: new THREE.Vector3(), ts: humo ? 2.2 : .9,
+    dead: false, humo: !!humo
+  };
+  m.userData.o = o;
+  pickables.push(m);
+  objs.push(o);
+  return o;
+}
+
+function kill(o){
+  if (o.dead) return;
+  o.dead = true;
+  const m = o.mesh;
+  m.material.transparent = true;
+  m.material.needsUpdate = true;
+  dying.push({ m, s0: m.scale.x || .9, life: 1 });
+  const i = pickables.indexOf(m);
+  if (i >= 0) pickables.splice(i, 1);
+  if (selO === o) selO = null;
+  if (hoverO === o) hoverO = null;
+}
+
+/* =====================================================================
+   Allocation
+   ===================================================================== */
+function edenSlot(){
+  let r = regions.find(x => x.type === 'eden' && x.objs.length < CAP);
+  if (r) return r;
+  r = regions.find(x => x.type === 'free');
+  if (r) setType(r, 'eden');
+  return r;
+}
+
+function newObj(cls){
+  let r = edenSlot();
+  if (!r){ youngGC(); r = edenSlot(); }
+  if (!r){ log('java.lang.OutOfMemoryError: Java heap space'); return null; }
+  const o = mkObj(cls);
+  move(o, r);
+  o.mesh.position.set(o.target.x, o.target.y + 6, o.target.z);   // drop-in animation
+  log('new ' + cls + '() -> #' + o.id + ' in eden region ' + r.i + ' (TLAB bump-pointer)');
+  return o;
+}
+
+function addRoot(o){
+  roots.push(o);
+  if (roots.length > 10){
+    const x = roots.shift();
+    log('local ' + nm(x) + ' went out of scope');
+  }
+}
+
+function newOrder(){
+  const o = newObj('Order');
+  if (!o) return;
+  addRoot(o);
+  const c = newObj('Customer');
+  if (!c){ refresh(); return; }
+  o.refs.push(c);
+  for (let i = 0; i < 2; i++){
+    const it = newObj('Item');
+    if (!it) break;
+    o.refs.push(it);
+  }
+  refresh();
+}
+
+function newPlain(){
+  const o = newObj(['Order', 'Customer', 'Item'][Math.floor(Math.random() * 3)]);
+  if (o) addRoot(o);
+  refresh();
+}
+
+function newHumo(){
+  let r = regions.find(x => x.type === 'free');
+  if (!r){ youngGC(); r = regions.find(x => x.type === 'free'); }
+  if (!r){ log('java.lang.OutOfMemoryError: Java heap space'); return; }
+  setType(r, 'humo');
+  const o = mkObj('byte[]', true);
+  move(o, r);
+  addRoot(o);
+  o.mesh.position.set(o.target.x, o.target.y + 6, o.target.z);
+  log('new byte[>= half region] -> #' + o.id + ' humongous, straight into old-gen region ' + r.i);
+  refresh();
+}
+
+function link(){
+  const live = [...reachSet].filter(o => !o.humo);
+  if (live.length < 2){ log('Need at least 2 reachable objects to link'); return; }
+  for (let k = 0; k < 30; k++){
+    const a = live[Math.floor(Math.random() * live.length)];
+    const b = live[Math.floor(Math.random() * live.length)];
+    if (a === b || a.refs.length >= 3 || a.refs.includes(b)) continue;
+    a.refs.push(b);
+    const ex = (a.reg.type === 'old' && (b.reg.type === 'eden' || b.reg.type === 'surv'))
+      ? ' (old->young: card table + remembered set)' : '';
+    log(nm(a) + ' field -> ' + nm(b) + ex);
+    refresh();
+    return;
+  }
+  log('No free reference slot found, try again');
+}
+
+function dropLocal(){
+  if (!roots.length){ log('No locals left'); return; }
+  const x = roots.splice(Math.floor(Math.random() * roots.length), 1)[0];
+  log('local ' + nm(x) + ' out of scope (garbage unless referenced elsewhere)');
+  refresh();
+}
+
+/* =====================================================================
+   GC
+   ===================================================================== */
+function youngLive(){
+  const isY = o => o.reg.type === 'eden' || o.reg.type === 'surv';
+  const s = new Set(), st = [];
+  for (const o of roots) if (isY(o)) st.push(o);
+  for (const o of objs) if (!isY(o)) for (const x of o.refs) if (isY(x)) st.push(x);
+  while (st.length){
+    const o = st.pop();
+    if (!o || s.has(o)) continue;
+    s.add(o);
+    for (const x of o.refs) if (isY(x) && !s.has(x)) st.push(x);
+  }
+  return s;
+}
+
+function dest(t, fs){
+  let r = regions.find(x => x.type === t && !fs.has(x) && x.objs.length < CAP);
+  if (!r){
+    r = regions.find(x => x.type === 'free');
+    if (r) setType(r, t);
+  }
+  return r;
+}
+
+function collect(live, from){
+  const fs = new Set(from);
+  let failed = 0;
+
+  for (const r of from){
+    for (const o of r.objs.slice()){
+      if (!live.has(o)){ kill(o); continue; }
+      if (r.type === 'humo') continue;
+      let d;
+      if (r.type === 'old') d = dest('old', fs);
+      else {
+        o.age++;
+        d = o.age >= TENURE ? dest('old', fs) : dest('surv', fs);
+      }
+      if (d) move(o, d); else failed++;
+    }
+  }
+
+  for (const r of from){
+    r.objs = r.objs.filter(o => o.reg === r && !o.dead);
+    if (r.objs.length) setType(r, r.type === 'humo' ? 'humo' : 'old');
+    else setType(r, 'free');
+  }
+
+  objs = objs.filter(o => !o.dead);
+  for (const o of objs) o.refs = o.refs.filter(x => !x.dead);
+
+  if (failed) log('To-space exhausted: ' + failed + ' objects pinned (evacuation failure)');
+}
+
+function youngGC(){
+  const from = regions.filter(r => r.type === 'eden' || r.type === 'surv');
+  if (!from.length){ log('Young GC: no young regions to collect'); return; }
+  const b = used(), n = objs.length;
+  collect(youngLive(), from);
+  log('Pause Young (Normal) (G1 Evacuation Pause) ' + b + '->' + used() +
+      ' regions, ' + n + '->' + objs.length + ' objects');
+  refresh();
+}
+
+function mixedGC(){
+  const live = reach();
+  const cand = regions.filter(r =>
+    r.type === 'old' && r.objs.length &&
+    r.objs.filter(o => live.has(o)).length / r.objs.length < .85);
+  const hd = regions.filter(r => r.type === 'humo' && !live.has(r.objs[0]));
+  const young = regions.filter(r => r.type === 'eden' || r.type === 'surv');
+
+  log('Concurrent Mark Cycle: initial mark, concurrent mark, remark, cleanup');
+  if (!cand.length && !hd.length)
+    log('No old region under 85% live: mixed GC acts like a young GC');
+
+  const b = used(), n = objs.length;
+  collect(live, [...young, ...cand, ...hd]);
+  log('Pause Young (Mixed) ' + b + '->' + used() + ' regions, ' + n + '->' +
+      objs.length + ' objects (' + cand.length + ' old, ' + hd.length +
+      ' humongous reclaimed)');
+  refresh();
+}
+
+function reset(){
+  for (const o of objs) scene.remove(o.mesh);
+  for (const d of dying) scene.remove(d.m);
+  objs = []; roots = []; nid = 1;
+  dying.length = 0; pickables.length = 0;
+  selO = selR = selSpecial = hoverO = hoverR = null;
+  for (const r of regions){ r.objs = []; setType(r, 'free'); }
+  log('Heap reset');
+  refresh();
+}
+
+/* =====================================================================
+   HUD / Inspector
+   ===================================================================== */
+function hud(){
+  const c = { eden:0, surv:0, old:0, humo:0, free:0 };
+  for (const r of regions) c[r.type]++;
+  $('#hud').innerHTML =
+    '<b>' + used() + '</b>/' + regions.length + ' regions · <b>' + objs.length +
+    '</b> objects · <b>' + roots.length + '</b> locals<br>' +
+    '<span class="dote" style="background:#3fb950"></span>' + c.eden +
+    '<span class="dote" style="background:#d29922"></span>' + c.surv +
+    '<span class="dote" style="background:#388bfd"></span>' + c.old +
+    '<span class="dote" style="background:#f85149"></span>' + c.humo +
+    '<span class="dote" style="background:#2d333b"></span>' + c.free;
+}
+
+function hex(n){ return '#' + n.toString(16).padStart(6, '0'); }
+
+function info(){
+  const el = $('#infoBody');
+
+  if (selO && !selO.dead){
+    const o = selO;
+    const live = reachSet.has(o);
+    const refs = o.refs.filter(x => !x.dead);
+    el.innerHTML =
+      '<div class="hdr" style="color:' + hex(CL[o.cls].col) + '">' + nm(o) + '</div>' +
+      '<div class="kv"><span>Class</span><b>' + o.cls + '</b></div>' +
+      '<div class="kv"><span>Size</span><b>' + (o.humo ? 'humongous array' : '~' + o.size + ' B') + '</b></div>' +
+      '<div class="kv"><span>Region</span><b>R' + o.reg.i + ' · ' + TNAME[o.reg.type] + '</b></div>' +
+      '<div class="kv"><span>Age</span><b>' + (o.humo ? '—' : o.age + ' / ' + TENURE) + '</b></div>' +
+      '<div class="kv"><span>Reachable</span><b style="color:' + (live ? '#3fb950' : '#f85149') + '">' +
+        (live ? 'yes' : 'no — garbage') + '</b></div>' +
+      '<div class="kv"><span>Refs</span><b>' + (refs.length ? refs.map(nm).join(', ') : 'none') + '</b></div>' +
+      '<div class="note">' + (o.humo
+        ? 'Humongous: ≥ half a region, allocated straight into old-gen, never copied, freed only after marking.'
+        : 'Header: 12 B by default, 8 B with -XX:+UseCompactObjectHeaders (JEP 519, product in Java 25).') +
+      '</div>';
+  } else if (selR){
+    const r = selR;
+    const live = r.objs.filter(o => reachSet.has(o)).length;
+    el.innerHTML =
+      '<div class="hdr">Region R' + r.i + '</div>' +
+      '<div class="kv"><span>Role</span><b>' + TNAME[r.type] + '</b></div>' +
+      '<div class="kv"><span>Objects</span><b>' + r.objs.length + ' / ' + (r.type === 'humo' ? 1 : CAP) + '</b></div>' +
+      '<div class="kv"><span>Live</span><b>' + live + ' / ' + r.objs.length + '</b></div>' +
+      '<div class="kv"><span>Contents</span><b>' +
+        (r.objs.length ? r.objs.map(nm).join(', ') : 'empty') + '</b></div>' +
+      '<div class="note">' + (r.type === 'free'
+        ? 'A free region can become eden, survivor, old or humongous — G1 regions are not fixed to a generation.'
+        : r.type === 'humo'
+          ? 'Humongous region: holds one object that is at least half the region size.'
+          : 'G1 copies live objects out of regions it collects; dead ones are simply abandoned.') +
+      '</div>';
+  } else if (selSpecial === 'stack'){
+    el.innerHTML =
+      '<div class="hdr" style="color:#ffa657">Java thread stack</div>' +
+      '<div class="kv"><span>Locals</span><b>' + roots.length + ' / 10</b></div>' +
+      '<div class="kv"><span>Contents</span><b>' +
+        (roots.length ? roots.map(nm).join(', ') : 'none') + '</b></div>' +
+      '<div class="note">Local variables (and static fields, JNI handles, threads…) are GC roots. ' +
+      'Anything reachable from a root is live; everything else is garbage.</div>';
+  } else if (selSpecial === 'meta'){
+    el.innerHTML =
+      '<div class="hdr" style="color:#d2a8ff">Metaspace</div>' +
+      '<div class="kv"><span>Location</span><b>native memory (off-heap)</b></div>' +
+      '<div class="kv"><span>Classes</span><b>' + Object.keys(CL).join(', ') + '</b></div>' +
+      '<div class="note">Class metadata lives outside the Java heap. Every object carries a klass pointer ' +
+      'to its class here — toggle “Klass ptrs” to draw those edges.</div>';
+  } else {
+    el.innerHTML =
+      '<div class="note">Click any object, region, class box or the stack to inspect it. ' +
+      'Hover to preview. Drag to orbit, right-drag (or Shift-drag) to pan, wheel to zoom.</div>';
+  }
+}
+
+function refresh(){
+  reachSet = reach();
+  for (const o of objs){
+    if (o.dead) continue;
+    o.mesh.material.color.setHex(reachSet.has(o) ? CL[o.cls].col : 0x59616b);
+  }
+  hud();
+  info();
+}
+
+/* =====================================================================
+   Buttons & camera presets
+   ===================================================================== */
+function mkBtns(id, list){
+  const box = $(id);
+  for (const [t, fn] of list){
+    const b = document.createElement('button');
+    b.textContent = t;
+    b.onclick = () => fn(b);
+    box.appendChild(b);
+  }
+}
+
+const cur = { t: new THREE.Vector3(0, 0, 2), d: 38, th: 0, ph: 1 };
+let goal = null;
+let autoOrbit = false;
+
+const VIEWS = {
+  'Overview':    { t:[-2, 0, 2],  d:38, th:0,   ph:1 },
+  'Inside heap': { t:[0, .8, 0],  d:7,  th:.6,  ph:1.25 },
+  'Metaspace':   { t:[-17, 0, 0], d:11, th:.8,  ph:1 },
+  'Stack':       { t:[0, 0, ZSTACK], d:11, th:.2, ph:1 }
+};
+function go(n){
+  const v = VIEWS[n];
+  goal = { t:new THREE.Vector3(...v.t), d:v.d, th:v.th, ph:v.ph };
+}
+
+mkBtns('#g1', [
+  ['new Object',      newPlain],
+  ['new Order graph', newOrder],
+  ['Humongous byte[]',newHumo],
+  ['Link refs',       link],
+  ['Drop local',      dropLocal]
+]);
+mkBtns('#g2', [
+  ['Young GC', youngGC],
+  ['Mixed GC', mixedGC],
+  ['Reset',    reset]
+]);
+mkBtns('#g3', [
+  ...Object.keys(VIEWS).map(n => [n, () => go(n)]),
+  ['Klass ptrs', b => { showK = !showK; b.classList.toggle('on', showK); }],
+  ['Region IDs', b => {
+    showRegLabels = !showRegLabels;
+    b.classList.toggle('on', showRegLabels);
+    for (const l of regionLabels) l.visible = showRegLabels;
+  }],
+  ['Auto-orbit', b => { autoOrbit = !autoOrbit; b.classList.toggle('on', autoOrbit); }],
+  ['Zoom +', () => { goal = null; cur.d = Math.max(2,  cur.d * .8); }],
+  ['Zoom −', () => { goal = null; cur.d = Math.min(75, cur.d * 1.25); }]
+]);
+
+/* =====================================================================
+   Camera input
+   ===================================================================== */
+let drag = null;
+const ptr = { x:0, y:0, inside:false };
+
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  drag = { x:e.clientX, y:e.clientY, sx:e.clientX, sy:e.clientY,
+           pan: e.button === 2 || e.shiftKey };
+  goal = null;
+});
+
+cv.addEventListener('pointermove', e => {
+  ptr.x = e.clientX; ptr.y = e.clientY; ptr.inside = true;
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+
+  if (drag.pan){
+    const k = cur.d * .0016;
+    cur.t.x += -Math.cos(cur.th) * dx * k + (-Math.sin(cur.th)) * dy * k;
+    cur.t.z +=  Math.sin(cur.th) * dx * k + (-Math.cos(cur.th)) * dy * k;
+  } else {
+    cur.th -= dx * .006;
+    cur.ph = Math.min(1.5, Math.max(.1, cur.ph - dy * .006));
+  }
+});
+
+cv.addEventListener('pointerup', e => {
+  if (drag && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 5) pick(e);
+  drag = null;
+});
+
+cv.addEventListener('pointerleave', () => {
+  ptr.inside = false;
+  hoverO = hoverR = null;
+  $('#tip').style.display = 'none';
+});
+
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  goal = null;
+  cur.d = Math.min(75, Math.max(2, cur.d * Math.exp(e.deltaY * .001)));
+}, { passive:false });
+
+/* =====================================================================
+   Picking / hover
+   ===================================================================== */
+const rc = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const staticPick = regionMeshes.concat([stackPlate, metaPlate]);
+
+function hitTest(){
+  ndc.set(ptr.x / innerWidth * 2 - 1, -(ptr.y / innerHeight) * 2 + 1);
+  rc.setFromCamera(ndc, cam);
+  return rc.intersectObjects(pickables.concat(staticPick))[0] || null;
+}
+
+function pick(e){
+  ptr.x = e.clientX; ptr.y = e.clientY;
+  const h = hitTest();
+  selO = selR = null; selSpecial = null;
+  if (h){
+    const u = h.object.userData;
+    if (u.o)            selO = u.o;
+    else if (u.reg)     selR = u.reg;
+    else if (u.special) selSpecial = u.special;
+  }
+  refresh();
+}
+
+/* =====================================================================
+   Resize
+   ===================================================================== */
+function rs(){
+  ren.setSize(innerWidth, innerHeight, false);
+  cam.aspect = innerWidth / innerHeight;
+  cam.updateProjectionMatrix();
+}
+window.addEventListener('resize', rs);
+rs();
+
+/* =====================================================================
+   Main loop
+   ===================================================================== */
+const tmpV = new THREE.Vector3();
+let last = performance.now();
+
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt = Math.min(.05, (now - last) / 1000) || 0.016;
+  last = now;
+  const T = now / 1000;
+
+  /* ---- camera ---- */
+  if (autoOrbit && !drag && !goal) cur.th += dt * 0.13;
+
+  if (goal){
+    const k = 1 - Math.exp(-dt * 5.5);
+    cur.t.lerp(goal.t, k);
+    cur.d  += (goal.d  - cur.d)  * k;
+    cur.th += (goal.th - cur.th) * k;
+    cur.ph += (goal.ph - cur.ph) * k;
+    if (cur.t.distanceTo(goal.t) < .02 &&
+        Math.abs(cur.d - goal.d) < .05 &&
+        Math.abs(cur.th - goal.th) < .005) goal = null;
+  }
+  cam.position.set(
+    cur.t.x + cur.d * Math.sin(cur.ph) * Math.sin(cur.th),
+    cur.t.y + cur.d * Math.cos(cur.ph),
+    cur.t.z + cur.d * Math.sin(cur.ph) * Math.cos(cur.th)
+  );
+  cam.lookAt(cur.t);
+
+  /* ---- object motion ---- */
+  const kp = 1 - Math.exp(-dt * 8);
+  for (const o of objs){
+    if (o.dead) continue;
+    o.mesh.position.lerp(o.target, kp);
+    const s = o.mesh.scale.x + (o.ts - o.mesh.scale.x) * kp;
+    o.mesh.scale.setScalar(s);
+  }
+
+  /* ---- dying garbage: float up + fade ---- */
+  for (let i = dying.length - 1; i >= 0; i--){
+    const d = dying[i];
+    d.life -= dt * 1.35;
+    const k = Math.max(0, d.life);
+    d.m.scale.setScalar(d.s0 * (0.25 + 0.75 * k));
+    d.m.material.opacity = k;
+    d.m.position.y += dt * 1.1;
+    d.m.rotation.y += dt * 2.2;
+    if (d.life <= 0){
+      scene.remove(d.m);
+      d.m.material.dispose();
+      dying.splice(i, 1);
+    }
+  }
+
+  /* ---- root markers ---- */
+  for (let i = 0; i < markers.length; i++){
+    const on = i < roots.length;
+    markers[i].visible = on;
+    if (on){
+      const s = 1 + .12 * Math.sin(T * 3 + i * 1.3);
+      markers[i].scale.setScalar(s);
+    }
+  }
+
+  /* ---- hover ---- */
+  if (ptr.inside && !drag){
+    const h = hitTest();
+    hoverO = (h && h.object.userData.o)   ? h.object.userData.o   : null;
+    hoverR = (h && h.object.userData.reg) ? h.object.userData.reg : null;
+
+    const tip = $('#tip');
+    if (hoverO){
+      const refs = hoverO.refs.filter(x => !x.dead).length;
+      tip.innerHTML = '<b>' + nm(hoverO) + '</b> <span class="sub">· ' + TNAME[hoverO.reg.type] +
+                      ' · age ' + (hoverO.humo ? '—' : hoverO.age) +
+                      ' · ' + refs + ' ref' + (refs === 1 ? '' : 's') + '</span>';
+      tip.style.display = 'block';
+    } else if (hoverR){
+      tip.innerHTML = '<b>Region R' + hoverR.i + '</b> <span class="sub">· ' +
+                      TNAME[hoverR.type] + ' · ' + hoverR.objs.length + ' obj</span>';
+      tip.style.display = 'block';
+    } else {
+      tip.style.display = 'none';
+    }
+    if (tip.style.display === 'block'){
+      tip.style.left = Math.min(innerWidth - tip.offsetWidth - 10, ptr.x + 16) + 'px';
+      tip.style.top  = Math.min(innerHeight - tip.offsetHeight - 10, ptr.y + 18) + 'px';
+    }
+    cv.style.cursor = (hoverO || hoverR) ? 'pointer' : 'grab';
+  }
+
+  /* ---- emissive pulses (selection / hover / region flash) ---- */
+  for (const o of objs){
+    if (o.dead) continue;
+    let e = 0;
+    if (o === selO)        e = .30 + .20 * Math.sin(T * 6);
+    else if (o === hoverO) e = .17;
+    o.mesh.material.emissive.setRGB(e * .95, e * .95, e * .70);
+  }
+  for (const r of regions){
+    const sel = (r === selR) ? (.18 + .10 * Math.sin(T * 5)) : 0;
+    const e = Math.max(r.flash * .35, sel);
+    r.m.material.emissive.setRGB(e, e, e * .78);
+    if (r.flash > 0) r.flash = Math.max(0, r.flash - dt * 1.7);
+  }
+
+  /* ---- lines ---- */
+  for (const o of objs){
+    if (o.dead) continue;
+    const live = reachSet.has(o);
+    const pulse = (live ? 1 : .38) * (.72 + .28 * Math.sin(T * 2.6 + o.id * .9));
+    for (const x of o.refs){
+      if (x.dead) continue;
+      seg(RefL, o.mesh.position, x.mesh.position, pulse);
+    }
+    if (showK){
+      tmpV.copy(CL[o.cls].mesh.position);
+      seg(KL, o.mesh.position, tmpV, live ? .9 : .35);
+    }
+  }
+  for (let i = 0; i < roots.length && i < markers.length; i++){
+    const o = roots[i];
+    if (!o || o.dead) continue;
+    seg(RootL, markers[i].position, o.mesh.position, .8 + .2 * Math.sin(T * 4 + i));
+  }
+  flush(RefL); flush(RootL); flush(KL);
+
+  ren.render(scene, cam);
+}
+
+/* =====================================================================
+   Boot
+   ===================================================================== */
+log('JVM 25 (simulated): G1 is the default collector, 32 regions');
+log('Start with "new Order graph", then "Drop local", then "Young GC"');
+refresh();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
